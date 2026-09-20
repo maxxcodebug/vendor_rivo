@@ -1,87 +1,81 @@
-name: Update RivoPhone
+name: Auto-update Rivo
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    # 10:00 AM Eastern Time is 14:00 UTC (during Daylight Saving Time)
+    - cron: '0 14 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
-concurrency:
-  group: update-rivo
-  cancel-in-progress: false
-
-env:
-  UPSTREAM: user-grinch/RivoPhoneApp
-  PKG: com.grinch.rivo4
-  APK: prebuilts/product/priv-app/RivoPhone/RivoPhone.apk
-  GH_TOKEN: ${{ github.token }}
-
 jobs:
-  update:
+  update-rivo:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Download latest upstream APK
-        id: dl
+      - name: Fetch latest release and extract files
+        id: update
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          json=$(gh api "repos/$UPSTREAM/releases?per_page=20")
-          rel=$(echo "$json" | jq -c '[.[] | select(.draft==false) | select(any(.assets[]; .name|test("foss.*\\.apk$")))] | first')
-          if [ "$rel" = "null" ]; then echo "::error::no foss APK in upstream releases"; exit 1; fi
-          tag=$(echo "$rel" | jq -r .tag_name)
-          asset=$(echo "$rel" | jq -r '[.assets[] | select(.name|test("foss.*\\.apk$"))][0].name')
-          mkdir -p "$RUNNER_TEMP/dl"
-          gh release download "$tag" -R "$UPSTREAM" -p "$asset" -D "$RUNNER_TEMP/dl" --clobber
-          new="$RUNNER_TEMP/dl/$asset"
-          if [ -f "$APK" ] && cmp -s "$new" "$APK"; then
-            echo "Already up to date ($tag)"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "new=$new" >> "$GITHUB_OUTPUT"
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          PKG="com.grinch.rivo4"
+
+          # Rivo ships preview (pre-release) builds and /releases/latest skips those,
+          # so take the newest non-draft release that has a foss APK.
+          RELEASES=$(curl -sfL -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/user-grinch/RivoPhoneApp/releases?per_page=20")
+
+          LATEST_RELEASE=$(echo "$RELEASES" | jq -c '[.[] | select(.draft == false) | select(any(.assets[]; .name | test("foss.*\\.apk$")))] | first')
+          if [ -z "$LATEST_RELEASE" ] || [ "$LATEST_RELEASE" = "null" ]; then
+            echo "Error: Could not find a release with a foss APK."
+            exit 1
           fi
 
-      - name: Validate APK
-        if: steps.dl.outputs.changed == 'true'
-        env:
-          NEW: ${{ steps.dl.outputs.new }}
-        run: |
-          set -euo pipefail
-          AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
-          BT=$(dirname "$AAPT2")
-          got=$("$AAPT2" dump packagename "$NEW")
-          [ "$got" = "$PKG" ] || { echo "::error::package changed: $got"; exit 1; }
-          "$BT/apksigner" verify --verbose "$NEW" | tee "$RUNNER_TEMP/sig.txt"
-          grep -Eq "Verified using v[234] scheme.*: true" "$RUNNER_TEMP/sig.txt" || { echo "::error::no v2+ signature"; exit 1; }
-          if unzip -v "$NEW" | awk '$NF ~ /\.so$/ && $2 != "Stored"' | grep -q .; then
-            echo "::warning::APK has compressed native libs, preprocessed: true may break"
+          # Extract the version tag (strip leading 'v')
+          VERSION_TAG=$(echo "$LATEST_RELEASE" | jq -r '.tag_name')
+          VERSION=${VERSION_TAG#v}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          DOWNLOAD_URL=$(echo "$LATEST_RELEASE" | jq -r '[.assets[] | select(.name | test("foss.*\\.apk$"))][0].browser_download_url')
+          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+            echo "Error: Could not find the release APK URL."
+            exit 1
           fi
 
-      - name: Apply update and push
-        if: steps.dl.outputs.changed == 'true'
-        env:
-          NEW: ${{ steps.dl.outputs.new }}
-          TAG: ${{ steps.dl.outputs.tag }}
-        run: |
-          set -euo pipefail
+          echo "Downloading from $DOWNLOAD_URL"
+          curl -sfL -o rivo.apk "$DOWNLOAD_URL"
+
+          # Safety: refuse anything that isn't Rivo
           AAPT2=$(ls -d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
-          cp -f "$NEW" "$APK"
-          perms=$("$AAPT2" dump permissions "$APK" | sed -n "s/^uses-permission[a-z0-9-]*: name='\([^']*\)'.*/\1/p" | sort -u)
+          GOT=$("$AAPT2" dump packagename rivo.apk)
+          if [ "$GOT" != "$PKG" ]; then
+            echo "Error: package is $GOT, expected $PKG"
+            exit 1
+          fi
+
+          # Create target directories
+          mkdir -p prebuilts/product/priv-app/RivoPhone
+          mkdir -p prebuilts/product/etc/permissions
+
+          mv rivo.apk prebuilts/product/priv-app/RivoPhone/RivoPhone.apk
+
+          # Rivo doesn't ship a privapp XML, so generate it from the APK manifest
+          PERMS=$("$AAPT2" dump permissions prebuilts/product/priv-app/RivoPhone/RivoPhone.apk \
+            | sed -n "s/^uses-permission[a-z0-9-]*: name='\([^']*\)'.*/\1/p" | sort -u)
           {
             echo '<?xml version="1.0" encoding="utf-8"?>'
             echo '<permissions>'
             echo "    <privapp-permissions package=\"$PKG\">"
-            while IFS= read -r p; do [ -n "$p" ] && echo "        <permission name=\"$p\"/>"; done <<< "$perms"
+            while IFS= read -r p; do [ -n "$p" ] && echo "        <permission name=\"$p\"/>"; done <<< "$PERMS"
             echo '    </privapp-permissions>'
             echo '</permissions>'
           } > "prebuilts/product/etc/permissions/privapp-permissions-$PKG.xml"
-          echo "$TAG" > version.txt
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "RivoPhone: update to $TAG"
-          git push
+
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Rivo: Auto-update to version ${{ steps.update.outputs.version }}"
+          file_pattern: "prebuilts/*"
