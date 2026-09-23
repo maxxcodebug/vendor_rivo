@@ -12,7 +12,6 @@
         <permission name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
         <permission name="android.permission.FOREGROUND_SERVICE_PHONE_CALL"/>
         <permission name="android.permission.MANAGE_OWN_CALLS"/>
-        <permission name="android.permission.PACKAGE_USAGE_STATS"/>
         <permission name="android.permission.POST_NOTIFICATIONS"/>
         <permission name="android.permission.READ_CALL_LOG"/>
         <permission name="android.permission.READ_CONTACTS"/>
@@ -20,7 +19,6 @@
         <permission name="android.permission.READ_MEDIA_AUDIO"/>
         <permission name="android.permission.READ_PHONE_STATE"/>
         <permission name="android.permission.RECORD_AUDIO"/>
-        <permission name="android.permission.SEND_SMS"/>
         <permission name="android.permission.SYSTEM_ALERT_WINDOW"/>
         <permission name="android.permission.USE_BIOMETRIC"/>
         <permission name="android.permission.USE_FINGERPRINT"/>
